@@ -1,0 +1,31 @@
+- name: SSH key + passwordless sudo for all executors
+  hosts: "execute_nodes,central_manager"
+  gather_facts: false
+  become: true
+
+  vars:
+    controller_pubkey: "{{ lookup('file', lookup('env','HOME') + '/.ssh/id_ed25519.pub') }}"
+
+  tasks:
+    - name: Ensure ~/.ssh exists
+      file:
+        path: "/home/{{ ansible_user }}/.ssh"
+        state: directory
+        mode: "0700"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Install controller public key
+      authorized_key:
+        user: "{{ ansible_user }}"
+        key: "{{ controller_pubkey }}"
+        state: present
+
+    - name: Enable passwordless sudo for this user
+      copy:
+        dest: "/etc/sudoers.d/{{ ansible_user }}-nopasswd"
+        content: "{{ ansible_user }} ALL=(ALL) NOPASSWD:ALL"
+        mode: "0440"
+        owner: root
+        group: root
+        validate: "visudo -cf %s"

@@ -1,0 +1,94 @@
+- name: Настроить кластер HTCondor
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    central_manager_ip: "192.168.56.110"
+    condor_cluster_password: "qwerty"
+    condor_config_dir: "/etc/condor"
+
+  tasks:
+    - name: Обновить кэш apt
+      apt:
+        update_cache: yes
+
+    - name: Установить пакет HTCondor
+      apt:
+        name: htcondor
+        state: present
+
+    - name: Создать каталоги Condor с нужными правами
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: condor
+        group: condor
+        mode: "0755"
+      loop:
+        - "{{ condor_config_dir }}"
+        - "{{ condor_config_dir }}/config.d"
+        - "{{ condor_config_dir }}/passwords.d"
+        - "/var/lib/condor/execute"
+        - "/var/lib/condor/spool"
+        - "/var/lib/condor/run"
+        - "/var/lib/condor/lock"
+        - "/var/log/condor"
+
+    - name: Установить пароль пула (владелец condor, 0600)
+      copy:
+        content: "{{ condor_cluster_password }}"
+        dest: "{{ condor_config_dir }}/passwords.d/POOL"
+        owner: condor
+        group: condor
+        mode: "0755"
+      notify: Перезапустить condor
+
+    - name: Создать базовую конфигурацию путей
+      copy:
+        dest: "{{ condor_config_dir }}/config.d/00-base.conf"
+        owner: condor
+        group: condor
+        mode: "0644"
+        content: |
+          LOCAL_DIR = /var/lib/condor
+          LOG = /var/log/condor
+          EXECUTE = /var/lib/condor/execute
+          SPOOL = /var/lib/condor/spool
+          RUN = /var/lib/condor/run
+          LOCK = /var/lib/condor/lock
+      notify: Перезапустить condor
+
+    - name: Настроить центральный менеджер
+      template:
+        src: central_manager.j2
+        dest: "{{ condor_config_dir }}/condor_config"
+        owner: condor
+        group: condor
+        mode: "0644"
+      when: "'central_manager' in group_names"
+      notify: Перезапустить condor
+
+    - name: Настроить вычислительные узлы
+      template:
+        src: execute_node.j2
+        dest: "{{ condor_config_dir }}/condor_config"
+        owner: condor
+        group: condor
+
+    - name: Проверить конфигурацию HTCondor (dry run)
+      command: condor_config_val -summary
+      register: condor_cfg_chk
+      changed_when: false
+
+    - name: Включить и запустить сервис HTCondor
+      systemd:
+        name: condor
+        enabled: yes
+        state: started
+
+  handlers:
+    - name: Перезапустить condor
+      systemd:
+        name: condor
+        state: restarted
