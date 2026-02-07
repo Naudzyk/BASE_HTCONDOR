@@ -1,8 +1,8 @@
 # HTCondor Execute Node Configuration - Fixed
 LOCAL_DIR = /var
 RELEASE_DIR = /usr
-CONDOR_HOST = {{ central_manager_ip }}
-COLLECTOR_HOST = {{ central_manager_ip }}
+CONDOR_HOST = 10.244.198.244
+COLLECTOR_HOST = 10.244.198.244
 DAEMON_LIST = MASTER, STARTD
 
 # Network Configuration
@@ -41,8 +41,8 @@ SLOT_PARTITIONING = cpus
 
 # Disable problematic features
 ENABLE_STARTD_DAEMON_AD = false
-GPU_DISCOVERY_EXTRA = 
-POWER_STATE_SCRIPT = 
+GPU_DISCOVERY_EXTRA =
+POWER_STATE_SCRIPT =
 
 # Debug settings
 STARTD_DEBUG = D_FULLDEBUG
@@ -50,7 +50,7 @@ STARTD_LOG = /var/log/condor/StartLog
 
 # Disable SharedPort
 SHARED_PORT = false
-SHARED_PORT_FILE = 
+SHARED_PORT_FILE =
 
 # Roles
 use ROLE: Execute

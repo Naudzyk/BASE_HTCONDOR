@@ -1,24 +1,96 @@
-- name: Настроить кластер HTCondor
+- name: Установить и настроить HTCondor кластер
   hosts: all
-  become: yes
   gather_facts: yes
+  become: yes
 
   vars:
-    central_manager_ip: "192.168.56.110"
+    central_manager_host: "{{ groups['central_manager'][0] }}"
+    central_manager_ip: "{{ hostvars[central_manager_host].ansible_host | default(central_manager_host) }}"
     condor_cluster_password: "qwerty"
-    condor_config_dir: "/etc/condor"
+    condor_base_dir: /opt
+    condor_link_path: /usr/local/condor
+    condor_config_dir: /etc/condor
+    condor_log_dir: /var/log/condor
+    condor_execute_dir: /var/lib/condor/execute
+    condor_spool_dir: /var/lib/condor/spool
+    condor_run_dir: /var/run/condor
+    condor_lock_dir: /var/lock/condor
+    condor_password_dir: /etc/condor/passwords.d
+    condor_password_file: /etc/condor/passwords.d/POOL
 
   tasks:
-    - name: Обновить кэш apt
+    - name: Установить системные зависимости
       apt:
+        name:
+          - curl
+          - procps
+          - libcurl4
+          - libldap-2.5-0
+          - ca-certificates
+        state: present
         update_cache: yes
 
-    - name: Установить пакет HTCondor
-      apt:
-        name: htcondor
-        state: present
+    - name: Создать пользователя и группу condor
+      user:
+        name: condor
+        system: yes
+        create_home: no
+      ignore_errors: true
 
-    - name: Создать каталоги Condor с нужными правами
+    - name: Создать группу condor (если не существует)
+      group:
+        name: condor
+        system: yes
+      ignore_errors: true
+
+    - name: Создать каталог для скачивания в /root
+      file:
+        path: /root/condor_download
+        state: directory
+        mode: "0755"
+      become: yes
+
+    - name: Скачать tar-архив HTCondor
+      shell: |
+        curl -fsSL https://get.htcondor.org | /bin/bash -s -- --download
+      args:
+        chdir: /root/condor_download
+      register: download_result
+      changed_when: "'Downloading to condor.tar.gz' in download_result.stdout"
+      become: yes
+
+    - name: Распаковать HTCondor в /opt
+      unarchive:
+        src: /root/condor_download/condor.tar.gz
+        dest: "{{ condor_base_dir }}"
+        remote_src: yes
+        creates: /tmp/condor_extracted
+
+    - name: Найти распакованный каталог HTCondor
+      find:
+        paths: "{{ condor_base_dir }}"
+        patterns: "condor-*"
+        file_type: directory
+      register: condor_dirs
+
+    - name: Зафиксировать путь к установленному HTCondor
+      set_fact:
+        condor_release_dir: "{{ condor_dirs.files[0].path }}"
+
+    - name: Завершить с ошибкой, если каталог не найден
+      assert:
+        that:
+          - condor_dirs.files | length == 1
+        fail_msg: "Не найден каталог HTCondor в {{ condor_base_dir }}"
+
+    - name: Создать символическую ссылку на HTCondor
+      file:
+        src: "{{ condor_dirs.files[0].path }}"
+        dest: "{{ condor_link_path }}"
+        state: link
+        force: yes
+
+    - name: Создать каталоги выполнения
       file:
         path: "{{ item }}"
         state: directory
@@ -26,69 +98,120 @@
         group: condor
         mode: "0755"
       loop:
-        - "{{ condor_config_dir }}"
-        - "{{ condor_config_dir }}/config.d"
-        - "{{ condor_config_dir }}/passwords.d"
-        - "/var/lib/condor/execute"
-        - "/var/lib/condor/spool"
-        - "/var/lib/condor/run"
-        - "/var/lib/condor/lock"
-        - "/var/log/condor"
+        - "{{ condor_execute_dir }}"
+        - "{{ condor_spool_dir }}"
+        - "{{ condor_log_dir }}"
+        - "{{ condor_run_dir }}"
+        - "{{ condor_lock_dir }}"
+        - "{{ condor_password_dir }}"
 
-    - name: Установить пароль пула (владелец condor, 0600)
-      copy:
-        content: "{{ condor_cluster_password }}"
-        dest: "{{ condor_config_dir }}/passwords.d/POOL"
+    - name: Обеспечить права на /var/run/condor и /var/lock/condor
+      file:
+        path: "{{ item }}"
+        state: directory
         owner: condor
         group: condor
         mode: "0755"
-      notify: Перезапустить condor
+      loop:
+        - /var/run/condor
+        - /var/lock/condor
 
-    - name: Создать базовую конфигурацию путей
-      copy:
-        dest: "{{ condor_config_dir }}/config.d/00-base.conf"
-        owner: condor
-        group: condor
-        mode: "0644"
-        content: |
-          LOCAL_DIR = /var/lib/condor
-          LOG = /var/log/condor
-          EXECUTE = /var/lib/condor/execute
-          SPOOL = /var/lib/condor/spool
-          RUN = /var/lib/condor/run
-          LOCK = /var/lib/condor/lock
-      notify: Перезапустить condor
+    - name: Создать каталог конфигурации
+      file:
+        path: "{{ condor_config_dir }}"
+        state: directory
+        mode: "0755"
 
     - name: Настроить центральный менеджер
       template:
         src: central_manager.j2
         dest: "{{ condor_config_dir }}/condor_config"
-        owner: condor
-        group: condor
+        owner: root
+        group: root
         mode: "0644"
       when: "'central_manager' in group_names"
-      notify: Перезапустить condor
 
     - name: Настроить вычислительные узлы
       template:
         src: execute_node.j2
         dest: "{{ condor_config_dir }}/condor_config"
-        owner: condor
-        group: condor
+        owner: root
+        group: root
+        mode: "0644"
+      when: "'execute_nodes' in group_names"
 
-    - name: Проверить конфигурацию HTCondor (dry run)
-      command: condor_config_val -summary
-      register: condor_cfg_chk
+    - name: Сохранить пароль пула на всех узлах
+      copy:
+        content: "{{ condor_cluster_password }}"
+        dest: "{{ condor_password_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Сохранить пароль пула на центральном менеджере
+      shell: |
+        set -eu
+        export PATH="{{ condor_release_dir }}/bin:{{ condor_release_dir }}/sbin:$PATH"
+        condor_store_cred -c add -f "{{ condor_password_file }}" -p "{{ condor_cluster_password }}"
+      args:
+        executable: /bin/bash
+      when: "'central_manager' in group_names"
+
+    - name: Добавить HTCondor в PATH
+      copy:
+        content: 'export PATH={{ condor_release_dir }}/bin:{{ condor_release_dir }}/sbin:$PATH'
+        dest: /etc/profile.d/htcondor.sh
+        mode: '0644'
+
+    - name: Остановить системный HTCondor (если запущен)
+      shell: |
+        if command -v systemctl >/dev/null 2>&1; then
+          systemctl stop condor || true
+          systemctl disable condor || true
+        fi
+      args:
+        executable: /bin/bash
+
+    - name: Остановить все процессы condor_* (кроме текущего Ansible)
+      shell: |
+        set -e
+        pgrep -f condor_ >/dev/null 2>&1 || exit 0
+        pkill -f condor_ || true
+      args:
+        executable: /bin/bash
+      failed_when: false
+
+    - name: Удалить lock-файл предыдущего запуска
+      file:
+        path: /var/lock/condor/InstanceLock
+        state: absent
+
+    - name: Запустить HTCondor Master
+      shell: |
+        export PATH={{ condor_release_dir }}/bin:{{ condor_release_dir }}/sbin:$PATH
+        condor_master -f &
+      args:
+        executable: /bin/bash
+      async: 3600
+      poll: 0
+
+    - name: Дождаться порта коллектора на менеджере
+      wait_for:
+        host: 127.0.0.1
+        port: 9618
+        delay: 2
+        timeout: 90
+      when: "'central_manager' in group_names"
+
+    - name: Проверить запуск HTCondor
+      shell: |
+        export PATH={{ condor_release_dir }}/bin:{{ condor_release_dir }}/sbin:$PATH
+        timeout 10 condor_status
+      args:
+        executable: /bin/bash
+      register: condor_status
       changed_when: false
-
-    - name: Включить и запустить сервис HTCondor
-      systemd:
-        name: condor
-        enabled: yes
-        state: started
-
-  handlers:
-    - name: Перезапустить condor
-      systemd:
-        name: condor
-        state: restarted
+      retries: 10
+      delay: 6
+      until: condor_status.rc == 0
+      when: "'central_manager' in group_names"
