@@ -3,6 +3,10 @@ set -e
 
 echo " Настройка Dropbear на Узл "
 
+sudo apt update
+
+sudo apt install dropbear
+
 
 chmod -s ~
 chmod 755 ~
