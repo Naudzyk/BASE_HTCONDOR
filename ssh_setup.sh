@@ -7,6 +7,7 @@ sudo apt update
 
 sudo apt install dropbear
 
+sudo apt install -y ansible
 
 chmod -s ~
 chmod 755 ~
