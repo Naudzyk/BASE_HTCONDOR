@@ -78,6 +78,24 @@
       set_fact:
         condor_release_dir: "{{ condor_dirs.files[0].path }}"
 
+    - name: Остановить системный HTCondor (если запущен)
+      shell: |
+        if command -v systemctl >/dev/null 2>&1; then
+          systemctl stop condor || true
+          systemctl disable condor || true
+        fi
+      args:
+        executable: /bin/bash
+
+    - name: Остановить все процессы condor_* (кроме текущего Ansible)
+      shell: |
+        set -e
+        pgrep -f condor_ >/dev/null 2>&1 || exit 0
+        pkill -f condor_ || true
+      args:
+        executable: /bin/bash
+      failed_when: false
+
     - name: Установить HTCondor в /usr (для шаблонов с RELEASE_DIR=/usr)
       shell: |
         if [ -d "{{ condor_release_dir }}/usr" ]; then
@@ -132,6 +150,27 @@
         state: directory
         mode: "0755"
 
+    - name: Обновить IP центрального менеджера в шаблонах
+      replace:
+        path: "{{ item.path }}"
+        regexp: "{{ item.regexp }}"
+        replace: "{{ item.replace }}"
+      loop:
+        - path: "{{ template_dir }}/central_manager.j2"
+          regexp: "^CONDOR_HOST\\s*=.*$"
+          replace: "CONDOR_HOST = {{ central_manager_ip }}"
+        - path: "{{ template_dir }}/central_manager.j2"
+          regexp: "^COLLECTOR_HOST\\s*=.*$"
+          replace: "COLLECTOR_HOST = {{ central_manager_ip }}"
+        - path: "{{ template_dir }}/execute_node.j2"
+          regexp: "^CONDOR_HOST\\s*=.*$"
+          replace: "CONDOR_HOST = {{ central_manager_ip }}"
+        - path: "{{ template_dir }}/execute_node.j2"
+          regexp: "^COLLECTOR_HOST\\s*=.*$"
+          replace: "COLLECTOR_HOST = {{ central_manager_ip }}"
+      delegate_to: localhost
+      run_once: true
+
     - name: Настроить центральный менеджер
       template:
         src: "{{ template_dir }}/central_manager.j2"
@@ -173,24 +212,6 @@
         dest: /etc/profile.d/htcondor.sh
         mode: '0644'
 
-    - name: Остановить системный HTCondor (если запущен)
-      shell: |
-        if command -v systemctl >/dev/null 2>&1; then
-          systemctl stop condor || true
-          systemctl disable condor || true
-        fi
-      args:
-        executable: /bin/bash
-
-    - name: Остановить все процессы condor_* (кроме текущего Ansible)
-      shell: |
-        set -e
-        pgrep -f condor_ >/dev/null 2>&1 || exit 0
-        pkill -f condor_ || true
-      args:
-        executable: /bin/bash
-      failed_when: false
-
     - name: Удалить lock-файл предыдущего запуска
       file:
         path: /var/lock/condor/InstanceLock
@@ -210,7 +231,7 @@
         host: 127.0.0.1
         port: 9618
         delay: 2
-        timeout: 40
+        timeout: 90
       when: "'central_manager' in group_names"
       delegate_to: "{{ central_manager_host }}"
 
