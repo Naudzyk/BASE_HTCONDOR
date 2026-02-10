@@ -10,6 +10,7 @@
     condor_base_dir: /opt
     condor_link_path: /usr/local/condor
     condor_config_dir: /etc/condor
+    template_dir: /home/jovyan/BASE_HTCONDOR/templates
     condor_log_dir: /var/log/condor
     condor_execute_dir: /var/lib/condor/execute
     condor_spool_dir: /var/lib/condor/spool
@@ -77,6 +78,15 @@
       set_fact:
         condor_release_dir: "{{ condor_dirs.files[0].path }}"
 
+    - name: Установить HTCondor в /usr (для шаблонов с RELEASE_DIR=/usr)
+      shell: |
+        if [ -d "{{ condor_release_dir }}/usr" ]; then
+          cp -a "{{ condor_release_dir }}/usr/." /usr/
+        fi
+      args:
+        executable: /bin/bash
+      become: yes
+
     - name: Завершить с ошибкой, если каталог не найден
       assert:
         that:
@@ -124,7 +134,7 @@
 
     - name: Настроить центральный менеджер
       template:
-        src: central_manager.j2
+        src: "{{ template_dir }}/central_manager.j2"
         dest: "{{ condor_config_dir }}/condor_config"
         owner: root
         group: root
@@ -133,7 +143,7 @@
 
     - name: Настроить вычислительные узлы
       template:
-        src: execute_node.j2
+        src: "{{ template_dir }}/execute_node.j2"
         dest: "{{ condor_config_dir }}/condor_config"
         owner: root
         group: root
@@ -159,7 +169,7 @@
 
     - name: Добавить HTCondor в PATH
       copy:
-        content: 'export PATH={{ condor_release_dir }}/bin:{{ condor_release_dir }}/sbin:$PATH'
+        content: 'export PATH=/usr/bin:/usr/sbin:$PATH'
         dest: /etc/profile.d/htcondor.sh
         mode: '0644'
 
@@ -188,8 +198,8 @@
 
     - name: Запустить HTCondor Master
       shell: |
-        export PATH={{ condor_release_dir }}/bin:{{ condor_release_dir }}/sbin:$PATH
-        condor_master -f &
+        export PATH=/usr/bin:/usr/sbin:$PATH
+        /usr/sbin/condor_master -f &
       args:
         executable: /bin/bash
       async: 3600
@@ -200,13 +210,14 @@
         host: 127.0.0.1
         port: 9618
         delay: 2
-        timeout: 90
+        timeout: 40
       when: "'central_manager' in group_names"
+      delegate_to: "{{ central_manager_host }}"
 
     - name: Проверить запуск HTCondor
       shell: |
-        export PATH={{ condor_release_dir }}/bin:{{ condor_release_dir }}/sbin:$PATH
-        timeout 10 condor_status
+        export PATH=/usr/bin:/usr/sbin:$PATH
+        timeout 10 /usr/bin/condor_status
       args:
         executable: /bin/bash
       register: condor_status
