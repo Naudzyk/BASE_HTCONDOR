@@ -5,12 +5,12 @@
 
 2. Сделайте скрипт исполняемым
 ```
- chmod +x ssh_setup.ssh
+ chmod +x ssh_setup.sh
 ```
 
 3. Запустите скрипт настройки SSH
 ```
-./ssh_setup.ssh
+./ssh_setup.sh
 ```
 
 4. Обмен публичными SSH-ключами между узлами 
