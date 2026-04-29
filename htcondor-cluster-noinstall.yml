@@ -1,0 +1,182 @@
+- name: Настроить HTCondor кластер (HTCondor уже установлен)
+  hosts: all
+  gather_facts: yes
+  become: yes
+
+  vars:
+    central_manager_host: "{{ groups['central_manager'][0] }}"
+    central_manager_ip: "{{ hostvars[central_manager_host].ansible_host | default(central_manager_host) }}"
+    condor_cluster_password: "qwerty"
+    condor_config_dir: /etc/condor
+    template_dir: ""
+    condor_log_dir: /var/log/condor
+    condor_execute_dir: /var/lib/condor/execute
+    condor_spool_dir: /var/lib/condor/spool
+    condor_run_dir: /var/run/condor
+    condor_lock_dir: /var/lock/condor
+    condor_password_dir: /etc/condor/passwords.d
+    condor_password_file: /etc/condor/passwords.d/POOL
+    condor_bin_dir: /usr/bin
+    condor_sbin_dir: /usr/sbin
+
+  tasks:
+    - name: Проверить, что HTCondor установлен
+      stat:
+        path: "{{ condor_sbin_dir }}/condor_master"
+      register: condor_master_bin
+
+    - name: Прервать, если HTCondor не установлен
+      fail:
+        msg: "Не найден {{ condor_sbin_dir }}/condor_master. Сначала установите HTCondor."
+      when: not condor_master_bin.stat.exists
+
+    - name: Создать пользователя condor (если нет)
+      user:
+        name: condor
+        system: yes
+        create_home: no
+      ignore_errors: true
+
+    - name: Создать группу condor (если нет)
+      group:
+        name: condor
+        system: yes
+      ignore_errors: true
+
+    - name: Определить каталог шаблонов
+      stat:
+        path: "{{ item }}"
+      register: template_candidates
+      loop:
+        - "{{ ansible_env.HOME }}/BASE_HTCONDOR/templates"
+        - "{{ playbook_dir }}/templates"
+      run_once: true
+
+    - name: Установить каталог шаблонов
+      set_fact:
+        template_dir: "{{ (template_candidates.results | selectattr('stat.exists') | map(attribute='stat.path') | list | first) | default('') }}"
+      run_once: true
+
+    - name: Прервать, если шаблоны не найдены
+      fail:
+        msg: "Не найден каталог templates ({{ ansible_env.HOME }}/BASE_HTCONDOR/templates или {{ playbook_dir }}/templates)"
+      when: template_dir == ""
+      run_once: true
+
+    - name: Создать рабочие каталоги HTCondor
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: condor
+        group: condor
+        mode: "0755"
+      loop:
+        - "{{ condor_execute_dir }}"
+        - "{{ condor_spool_dir }}"
+        - "{{ condor_log_dir }}"
+        - "{{ condor_run_dir }}"
+        - "{{ condor_lock_dir }}"
+        - "{{ condor_password_dir }}"
+
+    - name: Создать каталог конфигурации
+      file:
+        path: "{{ condor_config_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Подставить IP центрального менеджера в шаблоны
+      replace:
+        path: "{{ item.path }}"
+        regexp: "{{ item.regexp }}"
+        replace: "{{ item.replace }}"
+      loop:
+        - { path: "{{ template_dir }}/central_manager.j2", regexp: '^CONDOR_HOST\s*=.*$',    replace: "CONDOR_HOST = {{ central_manager_ip }}" }
+        - { path: "{{ template_dir }}/central_manager.j2", regexp: '^COLLECTOR_HOST\s*=.*$', replace: "COLLECTOR_HOST = {{ central_manager_ip }}" }
+        - { path: "{{ template_dir }}/execute_node.j2",    regexp: '^CONDOR_HOST\s*=.*$',    replace: "CONDOR_HOST = {{ central_manager_ip }}" }
+        - { path: "{{ template_dir }}/execute_node.j2",    regexp: '^COLLECTOR_HOST\s*=.*$', replace: "COLLECTOR_HOST = {{ central_manager_ip }}" }
+      delegate_to: localhost
+      run_once: true
+      become: false
+
+    - name: Конфиг центрального менеджера
+      template:
+        src: "{{ template_dir }}/central_manager.j2"
+        dest: "{{ condor_config_dir }}/condor_config"
+        owner: root
+        group: root
+        mode: "0644"
+      when: "'central_manager' in group_names"
+
+    - name: Конфиг вычислительных узлов
+      template:
+        src: "{{ template_dir }}/execute_node.j2"
+        dest: "{{ condor_config_dir }}/condor_config"
+        owner: root
+        group: root
+        mode: "0644"
+      when: "'execute_nodes' in group_names"
+
+    - name: Записать пароль пула на всех узлах
+      copy:
+        content: "{{ condor_cluster_password }}"
+        dest: "{{ condor_password_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Сохранить пароль пула через condor_store_cred (только на менеджере)
+      shell: |
+        set -eu
+        export PATH="{{ condor_sbin_dir }}:{{ condor_bin_dir }}:$PATH"
+        condor_store_cred -c add -f "{{ condor_password_file }}" -p "{{ condor_cluster_password }}"
+      args:
+        executable: /bin/bash
+      when: "'central_manager' in group_names"
+
+    - name: Прописать HTCondor в PATH для всех логинов
+      copy:
+        content: 'export PATH={{ condor_bin_dir }}:{{ condor_sbin_dir }}:$PATH'
+        dest: /etc/profile.d/htcondor.sh
+        mode: '0644'
+
+    - name: Остановить старые процессы condor_*
+      shell: pkill -f condor_ || true
+      args:
+        executable: /bin/bash
+      failed_when: false
+
+    - name: Удалить lock-файл предыдущего запуска
+      file:
+        path: "{{ condor_lock_dir }}/InstanceLock"
+        state: absent
+
+    - name: Запустить condor_master в фоне
+      shell: |
+        export PATH={{ condor_sbin_dir }}:{{ condor_bin_dir }}:$PATH
+        nohup {{ condor_sbin_dir }}/condor_master -f >/var/log/condor/master.out 2>&1 &
+      args:
+        executable: /bin/bash
+      async: 3600
+      poll: 0
+
+    - name: Дождаться порта коллектора на менеджере
+      wait_for:
+        host: 127.0.0.1
+        port: 9618
+        delay: 2
+        timeout: 90
+      when: "'central_manager' in group_names"
+      delegate_to: "{{ central_manager_host }}"
+
+    - name: Проверить condor_status (с менеджера)
+      shell: |
+        export PATH={{ condor_bin_dir }}:{{ condor_sbin_dir }}:$PATH
+        timeout 10 {{ condor_bin_dir }}/condor_status
+      args:
+        executable: /bin/bash
+      register: condor_status
+      changed_when: false
+      retries: 10
+      delay: 6
+      until: condor_status.rc == 0
+      when: "'central_manager' in group_names"
